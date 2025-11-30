@@ -32,7 +32,8 @@ function base64Encode(str) {
 app.post('/api/process-commit', async (req, res) => {
     const token = req.header('X-Server-Token')
     const commitData = req.body
-    
+    console.log("-> token ", token)
+    console.log("-> SERVER_SECRET ", SERVER_SECRET)
     // 1. Security Check: Validate the shared secret token
     if (!token || token !== SERVER_SECRET) {
         console.error('Unauthorized request received.')
