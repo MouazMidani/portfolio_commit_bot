@@ -17,7 +17,7 @@ const REPO_PO_API_PAT = process.env.REPO_PO_API_PAT
 const GITHUB_API_BASE = `https://api.github.com/repos/${REPO_PO_OWNER}/${REPO_PO_NAME}`
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY
-const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent'
+const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent'
 
 // Project to repository mapping
 const PROJECT_REPO_MAP = {
@@ -91,7 +91,7 @@ async function generateHistoryEntry(existingHistory, projectContext, newHistoryE
     5. Increment the id from the last entry (last id was: ${existingHistory[existingHistory.length - 1]?.id || 0})
 
     IMPORTANT FORMATTING RULES:
-    - Return ONLY valid JSON
+    - Return ONLY valid JSON array for all the date groups.
     - Match the exact structure of existing entries
     - Use an empty array for screenshots: []
     - Be specific about technologies and features mentioned in commits
@@ -145,11 +145,11 @@ async function generateHistoryEntry(existingHistory, projectContext, newHistoryE
  */
 async function findProjectsDataFile() {
     const possiblePaths = [
-        'app/ProjectsData.tsx',
-        'src/data/ProjectsData.tsx',
-        'data/ProjectsData.tsx',
-        'ProjectsData.tsx',
-        'src/ProjectsData.tsx'
+        'app/projectsData.json',
+        'src/data/projectsData.json',
+        'data/projectsData.json',
+        'projectsData.json',
+        'src/projectsData.json'
     ]
     
     console.log(`\nSearching for ProjectsData.tsx in ${REPO_PO_OWNER}/${REPO_PO_NAME}`)
@@ -199,12 +199,11 @@ async function findProjectsDataFile() {
 /**
  * Updates the ProjectsData.tsx file with new history entries
  */
-async function updateProjectsDataFile(projectId, newHistoryEntries, filePath) {
-    console.log(`Fetching ProjectsData.tsx from ${filePath}...`)
+async function updateProjectsDataFile(projectId, newHistoryEntries, jsonFilePath) {
+    console.log(`Fetching projectsData.json from ${jsonFilePath}...`)
     
-    // Fetch current file
     const getFileResponse = await axios.get(
-        `${GITHUB_API_BASE}/contents/${filePath}`,
+        `${GITHUB_API_BASE}/contents/${jsonFilePath}`,
         {
             params: { ref: TARGET_BRANCH },
             headers: {
@@ -215,39 +214,22 @@ async function updateProjectsDataFile(projectId, newHistoryEntries, filePath) {
     )
 
     const fileData = getFileResponse.data
-    let currentContent = Buffer.from(fileData.content, 'base64').toString('utf8')
-    
-    // Find the project by ID and update its history
-    const projectPattern = new RegExp(`(\\{[^}]*id:\\s*${projectId}[^}]*history:\\s*\\[)([\\s\\S]*?)(\\]\\s*\\})`)
-    
-    // Parse existing history to get the structure
-    const match = projectPattern.exec(currentContent)
-    if (!match) {
-        throw new Error(`Could not find project with id ${projectId} in ProjectsData.tsx`)
+    const projectsData = JSON.parse(
+        Buffer.from(fileData.content, 'base64').toString('utf8')
+    )
+    console.log("-> projectsData: ", projectsData)
+    const project = projectsData.find(p => p.id === projectId)
+    if (!project) {
+        throw new Error(`Could not find project with id ${projectId}`)
     }
     
-    // Convert new entries to string format
-    const newEntriesString = newHistoryEntries.map(entry => 
-        JSON.stringify(entry, null, 6).split('\n').map(line => '      ' + line).join('\n')
-    ).join(',\n')
+    project.history.push(...newHistoryEntries)
     
-    // Find the last history entry and add new ones after it
-    const historySection = match[2]
-    const updatedHistorySection = historySection.trimEnd() + ',\n' + newEntriesString + '\n      '
-    
-    // Replace in content
-    currentContent = currentContent.replace(
-        match[0],
-        match[1] + updatedHistorySection + match[3]
-    )
-    
-    // Commit the updated file
-    console.log(`Committing updated ProjectsData.tsx...`)
-    const commitResponse = await axios.put(
-        `${GITHUB_API_BASE}/contents/${filePath}`,
+    await axios.put(
+        `${GITHUB_API_BASE}/contents/${jsonFilePath}`,
         {
-            message: `Auto-update: Add project history entries for ${new Date().toISOString().split('T')[0]}`,
-            content: Buffer.from(currentContent).toString('base64'),
+            message: `Auto-update: Add project history for ${new Date().toISOString().split('T')[0]}`,
+            content: Buffer.from(JSON.stringify(projectsData, null, 2)).toString('base64'),
             sha: fileData.sha,
             branch: TARGET_BRANCH
         },
@@ -260,38 +242,33 @@ async function updateProjectsDataFile(projectId, newHistoryEntries, filePath) {
         }
     )
 
-    console.log('Successfully updated ProjectsData.tsx')
+    console.log('✅ Successfully updated projectsData.json')
 }
 
 /**
  * Parse project data from file content
  */
 function parseProjectData(content, projectId) {
-    // Find the specific project
-    const projectRegex = new RegExp(`\\{[^}]*id:\\s*${projectId}[\\s\\S]*?history:\\s*\\[([\\s\\S]*?)\\]\\s*\\}`)
-    const match = projectRegex.exec(content)
-    
-    if (!match) {
-        throw new Error(`Could not find project with id ${projectId}`)
-    }
-    
-    // Extract history entries
-    const historyString = match[1]
-    const historyEntries = []
-    
-    // Parse individual history entries
-    const entryRegex = /\{[\s\S]*?\}/g
-    let entryMatch
-    while ((entryMatch = entryRegex.exec(historyString)) !== null) {
-        try {
-            const entry = eval('(' + entryMatch[0] + ')')
-            historyEntries.push(entry)
-        } catch (e) {
-            console.warn('Failed to parse history entry:', e.message)
+    try {
+        // Parse the JSON content
+        const projectsData = JSON.parse(content)
+        
+        // Find the specific project by ID
+        const project = projectsData.find(p => p.id === projectId)
+        
+        if (!project) {
+            throw new Error(`Could not find project with id ${projectId}`)
         }
+        
+        // Return the history entries
+        return project.history || []
+        
+    } catch (error) {
+        if (error instanceof SyntaxError) {
+            throw new Error(`Invalid JSON in projectsData.json: ${error.message}`)
+        }
+        throw error
     }
-    
-    return historyEntries
 }
 
 /**
@@ -350,12 +327,15 @@ async function processAndCommit(data) {
         
         // 5. Generate new history entries using Gemini for each date
         const newHistoryEntries = []
+        console.log("-> existing History: ", existingHistory)
         for (const [date, dateCommits] of Object.entries(groupedCommits)) {
             // Check if we already have an entry for this date
-            const existingEntry = existingHistory.find(h => h.date === date)
-            if (existingEntry) {
-                console.log(`History entry for ${date} already exists. Skipping.`)
-                continue
+            if(existingHistory){
+                const existingEntry = existingHistory.find(h => h.date === date)
+                if (existingEntry) {
+                    console.log(`History entry for ${date} already exists. Skipping.`)
+                    continue
+                }
             }
             
             newHistoryEntries.push({
@@ -366,7 +346,7 @@ async function processAndCommit(data) {
             })
         }
 
-        console.log(`Generating history entry for ${date} with ${dateCommits.length} commits...`)
+        console.log(`Generating history entry commits...`)
         const newHistoryResult = await generateHistoryEntry(existingHistory, projectContext, newHistoryEntries)
         
         if (newHistoryResult.length === 0) {
