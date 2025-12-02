@@ -21,7 +21,7 @@ const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/
 
 // Project to repository mapping
 const PROJECT_REPO_MAP = {
-    'MouazMidani/testRepo': 3, // Labelify AI
+    'MouazMidani/Barqode': 3, // Labelify AI
     'MouazMidani/React_Practice_TrendingMovies': 5,
     'MouazMidani/React_Practice_Storify': 6,
     'MouazMidani/React_Practice_Foodies': 7
@@ -112,7 +112,7 @@ async function generateHistoryEntry(existingHistory, projectContext, newHistoryE
                 temperature: 0.7,
                 topK: 40,
                 topP: 0.95,
-                maxOutputTokens: 2048,
+                maxOutputTokens: 4096,
             }
         },
         {
@@ -195,11 +195,115 @@ async function findProjectsDataFile() {
     
     throw new Error('Could not find ProjectsData.tsx in any common location')
 }
+/**
+ * Updates existing history entries with new commits
+ */
+async function updateExistingHistoryEntries(updatesToExisting) {
+    const prompt = `You are an expert developer updating existing portfolio project history entries with new commits.
+
+    TASK: For each existing entry, add new accomplishments based on the new commits while preserving the existing accomplishments.
+
+    ${updatesToExisting.map(update => `
+    EXISTING ENTRY FOR ${update.date}:
+    ${JSON.stringify(update.existingEntry, null, 2)}
+    
+    NEW COMMITS TO ADD:
+    ${update.dateCommits.map(c => `- ${c.message} (${c.sha})`).join('\n')}
+    `).join('\n\n')}
+
+    IMPORTANT RULES:
+    1. Keep the existing id, date, title, and description
+    2. APPEND new accomplishments to the existing accomplishments array
+    3. Do NOT remove or modify existing accomplishments
+    4. Make new accomplishments detailed and technical
+    5. If the new commits are very similar to existing accomplishments, intelligently merge them
+    6. Return ONLY a JSON array of updated entries in the same structure
+    
+    Return ONLY the JSON array of updated entries, nothing else.`
+
+    try {
+        const response = await axios.post(
+            `${GEMINI_API_URL}?key=${GEMINI_API_KEY}`,
+            {
+                contents: [{
+                    parts: [{
+                        text: prompt
+                    }]
+                }],
+                generationConfig: {
+                    temperature: 0.7,
+                    topK: 40,
+                    topP: 0.95,
+                    maxOutputTokens: 2048,
+                }
+            },
+            {
+                headers: {
+                    'Content-Type': 'application/json'
+                }
+            }
+        )
+
+        console.log('Full Gemini API response:', JSON.stringify(response.data, null, 2))
+
+        // Check if response has the expected structure
+        if (!response.data || !response.data.candidates || response.data.candidates.length === 0) {
+            console.error('Invalid Gemini API response structure:', response.data)
+            throw new Error('Gemini API returned empty or invalid response')
+        }
+
+        if (!response.data.candidates[0].content || !response.data.candidates[0].content.parts) {
+            console.error('Missing content in Gemini response:', response.data.candidates[0])
+            throw new Error('Gemini API response missing content parts')
+        }
+
+        const generatedText = response.data.candidates[0].content.parts[0].text
+        console.log('Gemini update response text:', generatedText)
+        
+        // Extract JSON from response
+        let jsonMatch = generatedText.match(/```json\s*([\s\S]*?)\s*```/)
+        if (jsonMatch) {
+            const parsed = JSON.parse(jsonMatch[1])
+            console.log('Parsed JSON from code block:', parsed)
+            return parsed
+        }
+        
+        jsonMatch = generatedText.match(/\[[\s\S]*\]/)
+        if (!jsonMatch) {
+            console.error('Could not find JSON array in response:', generatedText)
+            throw new Error('Failed to extract JSON array from Gemini response')
+        }
+        
+        const parsed = JSON.parse(jsonMatch[0])
+        console.log('Parsed JSON from text:', parsed)
+        return parsed
+
+    } catch (error) {
+        console.error('❌ Error in updateExistingHistoryEntries:', error.message)
+        console.error('Full error:', error)
+        
+        // Fallback: manually append new commits to existing entries
+        console.log('⚠️ Falling back to manual update...')
+        return updatesToExisting.map(update => {
+            const newAccomplishments = update.dateCommits.map(commit => 
+                `Updated: ${commit.message} (${commit.sha})`
+            )
+            
+            return {
+                ...update.existingEntry,
+                accomplishments: [
+                    ...(update.existingEntry.accomplishments || []),
+                    ...newAccomplishments
+                ]
+            }
+        })
+    }
+}
 
 /**
- * Updates the ProjectsData.tsx file with new history entries
+ * Updates the projectsData.json file with new and updated history entries
  */
-async function updateProjectsDataFile(projectId, newHistoryEntries, jsonFilePath) {
+async function updateProjectsDataFileWithChanges(projectId, newEntries, updatedEntries, jsonFilePath) {
     console.log(`Fetching projectsData.json from ${jsonFilePath}...`)
     
     const getFileResponse = await axios.get(
@@ -217,18 +321,32 @@ async function updateProjectsDataFile(projectId, newHistoryEntries, jsonFilePath
     const projectsData = JSON.parse(
         Buffer.from(fileData.content, 'base64').toString('utf8')
     )
-    console.log("-> projectsData: ", projectsData)
+    
     const project = projectsData.find(p => p.id === projectId)
     if (!project) {
         throw new Error(`Could not find project with id ${projectId}`)
     }
     
-    project.history.push(...newHistoryEntries)
+    // Update existing entries
+    updatedEntries.forEach(updatedEntry => {
+        const index = project.history.findIndex(h => h.date === updatedEntry.date)
+        if (index !== -1) {
+            project.history[index] = updatedEntry
+            console.log(`✓ Updated history entry for ${updatedEntry.date}`)
+        }
+    })
     
+    // Add new entries
+    if (newEntries.length > 0) {
+        project.history.push(...newEntries)
+        console.log(`✓ Added ${newEntries.length} new history entries`)
+    }
+    
+    // Commit changes
     await axios.put(
         `${GITHUB_API_BASE}/contents/${jsonFilePath}`,
         {
-            message: `Auto-update: Add project history for ${new Date().toISOString().split('T')[0]}`,
+            message: `Auto-update: Project history updated (${newEntries.length} new, ${updatedEntries.length} updated)`,
             content: Buffer.from(JSON.stringify(projectsData, null, 2)).toString('base64'),
             sha: fileData.sha,
             branch: TARGET_BRANCH
@@ -308,7 +426,7 @@ async function processAndCommit(data) {
         console.log(`Grouped into ${Object.keys(groupedCommits).length} dates:`, Object.keys(groupedCommits))
         
         // 4. Fetch current project data to get existing history
-        console.log('Locating ProjectsData.tsx file...')
+        console.log('Locating projectsData.json file...')
         const { path: filePath, data: projectsFileData } = await findProjectsDataFile()
         
         const projectsContent = Buffer.from(projectsFileData.content, 'base64').toString('utf8')
@@ -325,41 +443,62 @@ async function processAndCommit(data) {
             features: []
         }
         
-        // 5. Generate new history entries using Gemini for each date
+        // 5. Separate dates into new entries and updates
         const newHistoryEntries = []
-        console.log("-> existing History: ", existingHistory)
-        for (const [date, dateCommits] of Object.entries(groupedCommits)) {
-            // Check if we already have an entry for this date
-            if(existingHistory){
-                const existingEntry = existingHistory.find(h => h.date === date)
-                if (existingEntry) {
-                    console.log(`History entry for ${date} already exists. Skipping.`)
-                    continue
-                }
-            }
-            
-            newHistoryEntries.push({
-                date,
-                dateCommits,
-                existingHistory,
-                projectContext
-            })
-        }
-
-        console.log(`Generating history entry commits...`)
-        const newHistoryResult = await generateHistoryEntry(existingHistory, projectContext, newHistoryEntries)
+        const updatesToExisting = []
         
-        if (newHistoryResult.length === 0) {
-            console.log('No new history entries to add.')
+        for (const [date, dateCommits] of Object.entries(groupedCommits)) {
+            const existingEntry = existingHistory.find(h => h.date === date)
+            
+            if (existingEntry) {
+                console.log(`History entry for ${date} exists. Will update it.`)
+                updatesToExisting.push({
+                    date,
+                    dateCommits,
+                    existingEntry,
+                    projectContext
+                })
+            } else {
+                console.log(`New date ${date}. Will create new entry.`)
+                newHistoryEntries.push({
+                    date,
+                    dateCommits,
+                    existingHistory,
+                    projectContext
+                })
+            }
+        }
+        
+        // 6. Generate new entries for new dates
+        let generatedNewEntries = []
+        if (newHistoryEntries.length > 0) {
+            console.log(`Generating ${newHistoryEntries.length} new history entries...`)
+            generatedNewEntries = await generateHistoryEntry(existingHistory, projectContext, newHistoryEntries)
+            console.log(`Generated ${generatedNewEntries.length} new entries.`)
+        }
+        
+        // 7. Update existing entries with new commits
+        let updatedEntries = []
+        if (updatesToExisting.length > 0) {
+            console.log(`Updating ${updatesToExisting.length} existing history entries...`)
+            updatedEntries = await updateExistingHistoryEntries(updatesToExisting)
+            console.log(`Updated ${updatedEntries.length} existing entries.`)
+        }
+        
+        if (generatedNewEntries.length === 0 && updatedEntries.length === 0) {
+            console.log('No changes needed.')
             return
         }
         
-        console.log(`Generated ${newHistoryResult.length} new history entries.`)
+        // 8. Update the projectsData.json file
+        await updateProjectsDataFileWithChanges(
+            projectId, 
+            generatedNewEntries, 
+            updatedEntries, 
+            filePath
+        )
         
-        // 6. Update the ProjectsData.tsx file
-        await updateProjectsDataFile(projectId, newHistoryResult, filePath)
-        
-        console.log(`✅ Successfully added ${newHistoryResult.length} new history entries.`)
+        console.log(`✅ Successfully processed ${generatedNewEntries.length} new entries and ${updatedEntries.length} updates.`)
         
     } catch (error) {
         console.error('❌ Error in processAndCommit:', error.message)
@@ -367,6 +506,7 @@ async function processAndCommit(data) {
         throw error
     }
 }
+
 
 // --- API Endpoint ---
 app.post('/api/process-commit', async (req, res) => {
